@@ -2,8 +2,8 @@ package cc.factorie.util
 
 import cc.factorie._
 import cc.factorie.app.nlp._
-import cc.factorie.app.nlp.coref.WithinDocCoref
-import java.io.{BufferedReader, FileReader}
+import cc.factorie.app.nlp.coref.{WithinDocEntity, WithinDocCoref}
+import java.io.{File, BufferedReader, FileReader}
 import scala.collection.mutable
 
 // Often for Cross-doc coref labelled data we have the documents labelled with
@@ -36,11 +36,26 @@ trait CrossDocAligner extends DocumentAnnotator {
 class CrossDocEntities extends mutable.ArrayBuffer[CrossDocEntity]
 
 case class CrossDocEntityImpl(trueLabel:Option[String], canonicalValue:Option[String], entType:Option[String], span:TokenSpan) extends CrossDocEntity
+
+// This is SUPER BAD!!! need a better to deal with this, but this is a useful class
+// also this is basically what RefMention does so we should consolidate.
+case class FloatingCrossDocEntity(label:String, canonicalVal:String, entityType:String, offsets:(Int, Int)) extends CrossDocEntity {
+  var span = null.asInstanceOf[TokenSpan]
+  val entType = Some(entityType)
+  val canonicalValue = Some(canonicalVal)
+  val trueLabel = Some(label)
+  def finishSpan(doc:Document) {
+    doc.getSectionByOffsets(offsets._1, offsets._2).getOrElse(doc.asSection).offsetSnapToTokens(offsets._1, offsets._2) foreach { ts =>
+      this.span = ts
+    }
+  }
+}
 trait CrossDocEntity {
   def trueLabel:Option[String]
   def canonicalValue:Option[String]
   def entType:Option[String]
   def span:TokenSpan
+  def withinDocEntity:Option[WithinDocEntity] = span.document.getCoref.findOverlapping(span).map(_.entity)
 }
 
 class Tac2009CrossDocAligner(tabFile:String, xmlFile:String) extends CrossDocAligner {
@@ -97,6 +112,38 @@ case class ReferenceMention(id:String, name:String, docId:String, offsets:Option
     start -> end
   }
   def getTokenSpan = doc.get.getSectionByOffsets(this.getOffsets._1, this.getOffsets._2).getOrElse(doc.get.asSection).offsetSnapToTokens(this.getOffsets._1, this.getOffsets._2)
+}
+
+// the John Smith Corpus is released as documents in different directories. Each
+// directory contains all of the documents associated with a single entity.
+class JohnSmithCrossDocAligner(jsmithDir:String) extends CrossDocAligner {
+  val docEntMap = new File(jsmithDir).listFiles().flatMap{ entDir =>
+    val entId = "jsmith-" + entDir.getName
+    entDir.listFiles.flatMap{ docFile =>
+      val docName = docFile.getName
+      val idx = new BufferedReader(new FileReader(docFile)).toIterator.mkString("\n").toLowerCase.indexOfSlice("john smith")
+      if(idx == -1) {
+        // todo something reasonable here
+        None
+      } else {
+        Some(docName -> FloatingCrossDocEntity(entId, "John Smith", "Person", (idx, idx + 10)))
+      }
+    }
+  }.toMap
+
+  def process(document: Document) = {
+    val xDocEnts = new CrossDocEntities
+    docEntMap.get(document.name) match {
+      case Some(xDocEnt) =>
+        xDocEnt.finishSpan(document)
+        xDocEnts += xDocEnt
+      case None =>
+        // todo something reasonable
+    }
+    document.attr += xDocEnts
+    document.annotators += classOf[CrossDocEntities] -> this.getClass
+    document
+  }
 }
 
 /**
