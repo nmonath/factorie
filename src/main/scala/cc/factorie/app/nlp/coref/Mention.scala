@@ -70,6 +70,9 @@ abstract class Mention(val phrase:Phrase) extends AbstractMention {
   def parent: ParentType = _entity
   lazy val string = phrase.tokensString(" ")
   // If number, gender and entity type are needed, put a CategoricalVariable subclass in the Attr
+
+  /** gives the NER type (if any) of the head token of this mention span. */
+  def getType:Option[String] = Option(phrase.headToken.nerTag).map(_.baseCategoryValue)
 }
 
 // TODO All three of these classes should be removed. -akm
@@ -127,6 +130,9 @@ abstract class WithinDocEntity(val document:Document) extends AbstractEntity {
   var canonicalName: String = null
   var canonicalMention: Mention = null
   // If number, gender and entity type are needed, put a CategoricalVariable subclass in the Attr
+
+  /** Return a bag of NER Types that mentions in this entity were assigned */
+  def getTypeBag:Map[String,Int] = mentions.toSeq.flatMap(_.getType).groupBy(identity).mapValues(_.size)
 }
 
 
