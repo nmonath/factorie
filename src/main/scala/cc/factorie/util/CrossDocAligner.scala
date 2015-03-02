@@ -37,19 +37,6 @@ class CrossDocEntities extends mutable.ArrayBuffer[CrossDocEntity]
 
 case class CrossDocEntityImpl(trueLabel:Option[String], canonicalValue:Option[String], entType:Option[String], span:TokenSpan) extends CrossDocEntity
 
-// This is SUPER BAD!!! need a better to deal with this, but this is a useful class
-// also this is basically what RefMention does so we should consolidate.
-case class FloatingCrossDocEntity(label:String, canonicalVal:String, entityType:String, offsets:(Int, Int)) extends CrossDocEntity {
-  var span = null.asInstanceOf[TokenSpan]
-  val entType = Some(entityType)
-  val canonicalValue = Some(canonicalVal)
-  val trueLabel = Some(label)
-  def finishSpan(doc:Document) {
-    doc.getSectionByOffsets(offsets._1, offsets._2).getOrElse(doc.asSection).offsetSnapToTokens(offsets._1, offsets._2) foreach { ts =>
-      this.span = ts
-    }
-  }
-}
 trait CrossDocEntity {
   def trueLabel:Option[String]
   def canonicalValue:Option[String]
@@ -58,24 +45,42 @@ trait CrossDocEntity {
   def withinDocEntity:Option[WithinDocEntity] = span.document.getCoref.findOverlapping(span).map(_.entity)
 }
 
-class Tac2009CrossDocAligner(tabFile:String, xmlFile:String) extends CrossDocAligner {
-  private val refMap = ReferenceMention.fromQueryFiles(tabFile, xmlFile).groupBy(_.docId)
-  override val prereqAttrs = Seq(classOf[WithinDocCoref])
+object DefaultAligner {
+  implicit val f:(Document, FloatingCrossDocEntity) => Option[TokenSpan] = { (doc, ent) =>
+    ent.offsets.orElse{
+      ent.canonicalValue.map { name =>
+        val start = doc.string.replaceAll("""-\n""","-").replaceAll("""\n"""," ").indexOfSlice(name)
+        val end = start + name.length - 1
+        start -> end
+      }
+    }.flatMap {case (s,e) => doc.getSectionByOffsets(s,e).getOrElse(doc.asSection).offsetSnapToTokens(s,e)}
+  }
+}
 
-  def process(document: Document) = {
+/** Represents a Cross Doc Entity label that has not yet been tied to a token span in a factorie document. */
+case class FloatingCrossDocEntity(trueLabel:String, canonicalValue:Option[String], entityType:Option[String], offsets:Option[(Int, Int)]) {
+
+  def alignTo(doc:Document)(implicit aligner:((Document, FloatingCrossDocEntity) => Option[TokenSpan])):Option[CrossDocEntity] = aligner(doc, this).map { ts =>
+    CrossDocEntityImpl(Some(trueLabel), canonicalValue, entityType, ts)
+  }
+}
+
+class FloatingCrossDocAligner(docEntMap:Map[String, Iterable[FloatingCrossDocEntity]]) extends CrossDocAligner{
+  def process(document:Document) = {
+    import DefaultAligner._
     val xDocEnts = new CrossDocEntities
-    refMap.get(document.name) match {
-      case Some(ents) =>
-        ents.foreach { ent =>
-          ent.doc = Some(document)
-          ent.getTokenSpan match {
-            case Some(span) => xDocEnts += CrossDocEntityImpl(Some(ent.entId), Some(ent.name), Some(ent.entType), span)
+    docEntMap.get(document.name) match {
+      case Some(floatingEnts) =>
+        xDocEnts ++= floatingEnts.flatMap{ fEnt =>
+          fEnt.alignTo(document) match {
+            case Some(ent) => Some(ent)
             case None =>
-              // todo do something reasonable
+              println("WARNING: Could not align entity %s in document %s".format(fEnt, document.name))
+              None
           }
         }
       case None =>
-        // todo do something reasonable
+        println("WARNING: Could not find cross doc ents for document: %s".format(document.name))
     }
     document.attr += xDocEnts
     document.annotators += classOf[CrossDocEntities] -> this.getClass
@@ -83,41 +88,29 @@ class Tac2009CrossDocAligner(tabFile:String, xmlFile:String) extends CrossDocAli
   }
 }
 
+class TacCrossDocAligner(tabFile:String, xmlFile:String) extends FloatingCrossDocAligner({
+  val entMap = new BufferedReader(new FileReader(tabFile)).toIterator.map { line =>
+    val Array(mentId, entId, entType) = line.split("\\s+")
+    mentId -> (entId, entType)
+  }.toMap
 
-object ReferenceMention{
-  def fromQueryFiles(queryXMLFile:String, queryTabFile:String):Iterable[ReferenceMention] = {
-    val entMap = new BufferedReader(new FileReader(queryTabFile)).toIterator.map { line =>
-      val Array(mentId, entId, entType) = line.split("\\s+")
-      mentId -> (entId, entType)
-    }.toMap
-
-    NonValidatingXML.loadFile(queryXMLFile).\\("kbpentlink").\\("query").map { qXML =>
-      val id = (qXML \ "@id").text.trim
-      val name = (qXML \ "name").text.trim
-      val docName = (qXML \ "docid").text.trim
-      val beg = qXML \ "beg"
-      val end = qXML \ "end"
-      assert(beg.isEmpty == end.isEmpty)
-      val offsets:Option[(Int, Int)] = if (beg.isEmpty || end.isEmpty) None else Some(beg.text.toInt, end.text.toInt)
-      ReferenceMention(id, name, docName, offsets, entMap(id)._1, entMap(id)._2)
-    }
-  }
-}
-
-case class ReferenceMention(id:String, name:String, docId:String, offsets:Option[(Int, Int)], entId:String, entType:String) {
-  var doc:Option[Document] = None
-  lazy val getOffsets:(Int, Int) = offsets.getOrElse {
-    val start = doc.get.string.replaceAll("""-\n""","-").replaceAll("""\n"""," ").indexOfSlice(name)
-    val end = start + name.length - 1
-    start -> end
-  }
-  def getTokenSpan = doc.get.getSectionByOffsets(this.getOffsets._1, this.getOffsets._2).getOrElse(doc.get.asSection).offsetSnapToTokens(this.getOffsets._1, this.getOffsets._2)
-}
+  val docEntMap = NonValidatingXML.loadFile(xmlFile).\\("kbpentlink").\\("query").map { qXML =>
+    val id = (qXML \ "@id").text.trim
+    val name = (qXML \ "name").text.trim
+    val docName = (qXML \ "docid").text.trim
+    val beg = qXML \ "beg"
+    val end = qXML \ "end"
+    val offsets:Option[(Int, Int)] = if (beg.isEmpty || end.isEmpty) None else Some(beg.text.toInt, end.text.toInt)
+    docName -> FloatingCrossDocEntity(entMap(id)._1, Some(name), entMap.get(id).map(_._2), offsets)
+    //ReferenceMention(id, name, docName, offsets, entMap(id)._1, entMap(id)._2)
+  }.groupBy(_._1).mapValues(_.map(_._2))
+  docEntMap
+})
 
 // the John Smith Corpus is released as documents in different directories. Each
 // directory contains all of the documents associated with a single entity.
-class JohnSmithCrossDocAligner(jsmithDir:String) extends CrossDocAligner {
-  val docEntMap = new File(jsmithDir).listFiles().flatMap{ entDir =>
+class JohnSmithCrossDocAligner(jsmithDir:String) extends FloatingCrossDocAligner({
+  new File(jsmithDir).listFiles().flatMap{ entDir =>
     val entId = "jsmith-" + entDir.getName
     entDir.listFiles.flatMap{ docFile =>
       val docName = docFile.getName
@@ -126,25 +119,12 @@ class JohnSmithCrossDocAligner(jsmithDir:String) extends CrossDocAligner {
         // todo something reasonable here
         None
       } else {
-        Some(docName -> FloatingCrossDocEntity(entId, "John Smith", "Person", (idx, idx + 10)))
+        Some(docName -> Seq(FloatingCrossDocEntity(entId, Some("John Smith"), Some("Person"), Some((idx, idx + 10)))))
       }
     }
   }.toMap
+})
 
-  def process(document: Document) = {
-    val xDocEnts = new CrossDocEntities
-    docEntMap.get(document.name) match {
-      case Some(xDocEnt) =>
-        xDocEnt.finishSpan(document)
-        xDocEnts += xDocEnt
-      case None =>
-        // todo something reasonable
-    }
-    document.attr += xDocEnts
-    document.annotators += classOf[CrossDocEntities] -> this.getClass
-    document
-  }
-}
 
 /**
  * A Document Annotator that takes WithinDocCoref Entities and upgrades them to
