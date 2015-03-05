@@ -10,13 +10,17 @@ import cc.factorie.variable.CategoricalDomain
 // We want to be able to generate XDocMentions from Documents, ?store them? and
 // run coref on the resulting mentions
 trait XDocCorefSystem[T] {
-  def generateEnts(doc:Document):Iterable[(String, T)]
+  def generateEnts(doc:Document):Iterable[(String, Option[String], T)]
   def getEntId(ent:T):String
   def doCoref(ments:Seq[T]):Seq[(T, Int)]
 
+  private val trueEntDomain = new CategoricalDomain[String]()
 
-  def generateXDocMentions(doc:Document):Iterable[XDocMention[T]] = generateEnts(doc) map { case (withinDocId, ent) =>
-    XDocMentionImpl(getEntId(ent), doc.name, withinDocId, ent)
+  def generateXDocMentions(doc:Document):Iterable[XDocMention[T]] = generateEnts(doc) map { case (withinDocId, trueEnt, ent) =>
+    val xMent = XDocMentionImpl(getEntId(ent), doc.name, withinDocId, ent)
+    trueEnt foreach trueEntDomain.+=
+    xMent.trueEnt = trueEnt.map(trueEntDomain.getIndex)
+    xMent
   }
 
   // TODO this is not well implemented - it drops non XDocMentionImpls on the ground
@@ -79,6 +83,6 @@ class HierCorefSystem[Vars <: NodeVariables[Vars]](getVars:CrossDocEntity => Var
   def generateEnts(doc: Document) = doc.attr[CrossDocEntities].map { docEnt =>
     val ment = new Mention[Vars](getVars(docEnt))(null)
     docEnt.withinDocEntity foreach (we => ment.withinDocEntityId = we.uniqueId)
-    ment.withinDocEntityId -> ment
+    (ment.withinDocEntityId, docEnt.trueLabel, ment)
   }
 }
