@@ -106,11 +106,14 @@ object JohnSmithExample {
 
   val getVars = { xEnt:CrossDocEntity =>
     val vars = new DocEntityVars()
+    vars.names ++= xEnt.span.tokens.map(_.lemmaString).toCountBag
+    vars.context ++= xEnt.span.contextBag(5).map(_.lemmaString).toCountBag
+    vars.nerType += "Person"
     vars
   }
 
   val getSampler = { ments:Seq[Node[DocEntityVars]] =>
-    val model = new DocEntityCorefModel(4.0, -0.25, 1.0, 2.0, -0.25, 1.0, -0.25, 1.0, -0.25, 1.0, -0.25)
+    val model = new DocEntityCorefModel(0.0, 0.0, 1.0, 2.0, -0.25, 1.0, -0.25, 1.0, -0.25, 1.0, -0.25)
     implicit val r = new scala.util.Random()
     new CorefSampler[DocEntityVars](model, ments, ments.size * 100)
       with AutoStoppingSampler[DocEntityVars]
@@ -137,6 +140,6 @@ object JohnSmithExample {
 
     val results = system.performCoref(xDocMentions.iterator)
 
-    EvaluatableClustering.evaluationString(XDocMention.predictedClustering(results), XDocMention.trueClustering(results))
+    println(EvaluatableClustering.evaluationString(XDocMention.predictedClustering(results), XDocMention.trueClustering(results)))
   }
 }

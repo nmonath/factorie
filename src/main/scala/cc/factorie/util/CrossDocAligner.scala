@@ -110,7 +110,7 @@ class TacCrossDocAligner(tabFile:String, xmlFile:String) extends FloatingCrossDo
 // the John Smith Corpus is released as documents in different directories. Each
 // directory contains all of the documents associated with a single entity.
 class JohnSmithCrossDocAligner(jsmithDir:String) extends FloatingCrossDocAligner({
-  new File(jsmithDir).listFiles().flatMap{ entDir =>
+  new File(jsmithDir).listFiles().filter(_.isDirectory).flatMap{ entDir =>
     val entId = "jsmith-" + entDir.getName
     entDir.listFiles.flatMap{ docFile =>
       val docName = docFile.getName
