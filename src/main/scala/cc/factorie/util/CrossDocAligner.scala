@@ -33,11 +33,41 @@ trait CrossDocAligner extends DocumentAnnotator {
 
 }
 
-class CrossDocEntities extends mutable.ArrayBuffer[CrossDocEntity]
+class CrossDocEntities extends mutable.ArrayBuffer[CrossDocEntity] {
+  var target:Option[CrossDocEntities] = None
+  def idBasedEvaluatableClustering = new BasicEvaluatableClustering(this.map{ent => ent.id -> ent.trueLabel.get})
+  def spanBasedEvaluatableClustings = {
+    def scoreOverlap(targ:CrossDocEntity, pred:CrossDocEntity):Double = if(pred.span.containsStrings(targ.span)) 1.0 else 0.0
+    val (gold, pred) = greedyAlign[CrossDocEntity](target.get , this, scoreOverlap).unzip
+    def clusterOf(ents:Seq[CrossDocEntity]) = new BasicEvaluatableClustering(ents.zipWithIndex.map {case (ent, id) => id.toString -> ent.trueLabel.get})
+    clusterOf(pred) -> clusterOf(gold)
+  }
 
-case class CrossDocEntityImpl(trueLabel:Option[String], canonicalValue:Option[String], entType:Option[String], span:TokenSpan) extends CrossDocEntity
+  // aligns every element in as with an element in bs by greedily picking the max score until no elements in as are unaligned and have a positive score
+  def greedyAlign[T](as:Iterable[T], bs:Iterable[T], score:(T, T) => Double):Seq[(T, T)] = {
+    val result = mutable.ArrayBuffer[(T, T)]()
+    val remainingAs = mutable.HashSet[T]()
+    val remainingBs = mutable.HashSet[T]()
+    var scoreQueue = as.flatMap{a => bs.map{b => (a, b) -> score(a,b)}}.toSeq.sortBy(- _._2)
+    remainingAs ++= as
+    remainingBs ++= bs
+    while(remainingAs.nonEmpty && scoreQueue.head._2 > 0.0) {
+      val (nextA, nextB) = scoreQueue.head._1
+      if(remainingAs.contains(nextA) && remainingBs.contains(nextB)) {
+        result += nextA -> nextB
+        remainingAs.remove(nextA)
+        remainingBs.remove(nextB)
+      }
+      scoreQueue = scoreQueue.tail
+    }
+    result
+  }
+}
+
+case class CrossDocEntityImpl(id:String, trueLabel:Option[String], canonicalValue:Option[String], entType:Option[String], span:TokenSpan) extends CrossDocEntity
 
 trait CrossDocEntity {
+  def id:String
   def trueLabel:Option[String]
   def canonicalValue:Option[String]
   def entType:Option[String]
@@ -58,20 +88,21 @@ object DefaultAligner {
 }
 
 /** Represents a Cross Doc Entity label that has not yet been tied to a token span in a factorie document. */
-case class FloatingCrossDocEntity(trueLabel:String, canonicalValue:Option[String], entityType:Option[String], offsets:Option[(Int, Int)]) {
+case class FloatingCrossDocEntity(id:String, trueLabel:String, canonicalValue:Option[String], entityType:Option[String], offsets:Option[(Int, Int)]) {
 
   def alignTo(doc:Document)(implicit aligner:((Document, FloatingCrossDocEntity) => Option[TokenSpan])):Option[CrossDocEntity] = aligner(doc, this).map { ts =>
-    CrossDocEntityImpl(Some(trueLabel), canonicalValue, entityType, ts)
+    CrossDocEntityImpl(id, Some(trueLabel), canonicalValue, entityType, ts)
   }
 }
 
 class FloatingCrossDocAligner(docEntMap:Map[String, Iterable[FloatingCrossDocEntity]]) extends CrossDocAligner{
   def process(document:Document) = {
     import DefaultAligner._
-    val xDocEnts = new CrossDocEntities
+    val xDocEnts = document.attr.get[CrossDocEntities].getOrElse(new CrossDocEntities)
+    xDocEnts.target = Some(new CrossDocEntities)
     docEntMap.get(document.name) match {
       case Some(floatingEnts) =>
-        xDocEnts ++= floatingEnts.flatMap{ fEnt =>
+        xDocEnts.target.get ++= floatingEnts.flatMap{ fEnt =>
           fEnt.alignTo(document) match {
             case Some(ent) => Some(ent)
             case None =>
@@ -101,7 +132,7 @@ class TacCrossDocAligner(tabFile:String, xmlFile:String) extends FloatingCrossDo
     val beg = qXML \ "beg"
     val end = qXML \ "end"
     val offsets:Option[(Int, Int)] = if (beg.isEmpty || end.isEmpty) None else Some(beg.text.toInt, end.text.toInt)
-    docName -> FloatingCrossDocEntity(entMap(id)._1, Some(name), entMap.get(id).map(_._2), offsets)
+    docName -> FloatingCrossDocEntity(id, entMap(id)._1, Some(name), entMap.get(id).map(_._2), offsets)
     //ReferenceMention(id, name, docName, offsets, entMap(id)._1, entMap(id)._2)
   }.groupBy(_._1).mapValues(_.map(_._2))
   docEntMap
@@ -119,7 +150,7 @@ class JohnSmithCrossDocAligner(jsmithDir:String) extends FloatingCrossDocAligner
         // todo something reasonable here
         None
       } else {
-        Some(docName -> Seq(FloatingCrossDocEntity(entId, Some("John Smith"), Some("Person"), Some((idx, idx + 10)))))
+        Some(docName -> Seq(FloatingCrossDocEntity(docName, entId, Some("John Smith"), Some("Person"), Some((idx, idx + 10)))))
       }
     }
   }.toMap
@@ -134,15 +165,14 @@ class CrossDocUpgrader extends CrossDocAligner {
   override val prereqAttrs = Seq(classOf[WithinDocCoref])
 
   def process(document: Document) = {
-    val xDocEnts = new CrossDocEntities
+    val xDocEnts = document.attr.get[CrossDocEntities].getOrElse(new CrossDocEntities)
     document.coref.entities foreach { ent =>
-      xDocEnts += CrossDocEntityImpl(None, Option(ent.canonicalName), ent.canonicalMention.getType, ent.getCanonicalMention.phrase)
+      xDocEnts += CrossDocEntityImpl(ent.uniqueId, None, Option(ent.canonicalName), ent.canonicalMention.getType, ent.getCanonicalMention.phrase)
     }
     document.attr += xDocEnts
     document.annotators += classOf[CrossDocEntities] -> this.getClass
     document
   }
-
 }
 
 // we need to take a document and a set of contained entities, which must have at
